@@ -1,0 +1,5 @@
+.DS_Store
+# Each build resolves packages against its own Flutter SDK.
+pubspec.lock
+# gh-pages worktree used by the publish workflow.
+/site/

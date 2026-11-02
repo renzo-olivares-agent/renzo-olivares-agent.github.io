@@ -1,0 +1,137 @@
+name: Publish demo
+
+# Builds demos/<demo> twice, against a "before" and an "after" Flutter commit,
+# and publishes both to GitHub Pages at <site>/<demo>/before/ and /after/.
+
+on:
+  workflow_dispatch:
+    inputs:
+      demo:
+        description: Directory under demos/ to build, e.g. demo-01
+        required: true
+      after:
+        description: "Flutter with the change: a PR number, owner:branch, or a SHA/branch/tag in flutter/flutter"
+        required: true
+      before:
+        description: Baseline Flutter ref. Defaults to the commit "after" forked from master
+        required: false
+      build_args:
+        description: Extra arguments for flutter build web, e.g. --wasm
+        required: false
+
+run-name: Publish ${{ inputs.demo }} (${{ inputs.after }})
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    # Naming the shell turns on pipefail, which the default shell leaves off.
+    shell: bash
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      before: ${{ steps.refs.outputs.before }}
+      after: ${{ steps.refs.outputs.after }}
+      base: ${{ steps.refs.outputs.base }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve Flutter refs
+        id: refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEMO: ${{ inputs.demo }}
+          AFTER: ${{ inputs.after }}
+          BEFORE: ${{ inputs.before }}
+        run: |
+          if [[ ! $DEMO =~ ^[a-z0-9][a-z0-9_-]*$ || ! -f demos/$DEMO/pubspec.yaml ]]; then
+            echo "::error::demos/$DEMO is not a demo app"
+            exit 1
+          fi
+          tool/resolve_refs.sh "$AFTER" "$BEFORE" | tee -a "$GITHUB_OUTPUT"
+
+          # A user site (<owner>.github.io) is served from /, any other
+          # repository from /<repo>/.
+          repo=${GITHUB_REPOSITORY#*/}
+          if [[ ${repo,,} == "${GITHUB_REPOSITORY_OWNER,,}.github.io" ]]; then
+            echo "base=/" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=/$repo/" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        variant: [before, after]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build ${{ matrix.variant }}
+        env:
+          DEMO: ${{ inputs.demo }}
+          SHA: ${{ needs.resolve.outputs[matrix.variant] }}
+          # Without a base href matching the path the build is served from,
+          # the page loads blank.
+          BASE_HREF: ${{ needs.resolve.outputs.base }}${{ inputs.demo }}/${{ matrix.variant }}/
+          BUILD_ARGS: ${{ inputs.build_args }}
+        run: tool/build_demo.sh "$DEMO" "$SHA" "$BASE_HREF" out $BUILD_ARGS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.variant }}
+          path: out
+          if-no-files-found: error
+
+  deploy:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # One writer to gh-pages at a time.
+    concurrency: gh-pages
+    env:
+      DEMO: ${{ inputs.demo }}
+      BEFORE: ${{ needs.resolve.outputs.before }}
+      AFTER: ${{ needs.resolve.outputs.after }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out gh-pages into site/
+        run: |
+          if git fetch --depth 1 origin gh-pages:gh-pages; then
+            git worktree add site gh-pages
+          else
+            git worktree add --orphan -b gh-pages site
+          fi
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+      - name: Publish to gh-pages
+        run: |
+          # Only this demo is replaced. Every other demo stays as published.
+          rm -rf "site/$DEMO"
+          mkdir "site/$DEMO"
+          mv artifacts/before artifacts/after "site/$DEMO/"
+          jq -n --arg name "$DEMO" --arg before "$BEFORE" --arg after "$AFTER" \
+            --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{name: $name, before: $before, after: $after, built: $built}' > "site/$DEMO/demo.json"
+          touch site/.nojekyll
+          tool/generate_index.py site
+
+          cd site
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --all
+          git commit --quiet -m "Publish $DEMO (${BEFORE:0:10}...${AFTER:0:10})"
+          git push origin gh-pages
+      - name: Summarize
+        env:
+          BASE: ${{ needs.resolve.outputs.base }}
+        run: |
+          url="https://${GITHUB_REPOSITORY_OWNER,,}.github.io$BASE$DEMO"
+          {
+            echo "Before: $url/before/"
+            echo
+            echo "After: $url/after/"
+          } >> "$GITHUB_STEP_SUMMARY"
