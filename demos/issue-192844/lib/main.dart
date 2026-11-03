@@ -72,8 +72,8 @@ class _DemoPageState extends State<DemoPage> {
             children: <Widget>[
               const Text(
                 'This multiline TextField is inside a SelectionArea. Click in it and '
-                'press the Up or Down arrow key: the caret should move between lines. '
-                'Without the fix it stays put and Flutter reports a TypeError.',
+                'press Shift+Up or Shift+Down to extend the selection by a line. '
+                'Without the fix, Flutter reports a TypeError, shown in red below.',
               ),
               const SizedBox(height: 16),
               TextField(
